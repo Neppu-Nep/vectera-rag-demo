@@ -6,7 +6,7 @@ from src import retriever
 def test_embed_query_and_rpc(monkeypatch) -> None:
     # Mock embedding
     class FakeEmbeddings:
-        def create(self, model, input):
+        def create(self, model, input, **kwargs):
             return SimpleNamespace(data=[SimpleNamespace(embedding=[0.1, 0.2, 0.3])])
 
     class FakeClient:
@@ -52,9 +52,14 @@ def test_embed_query_and_rpc(monkeypatch) -> None:
         "get_supabase_client",
         lambda: FakeSupabase(),
     )
+    monkeypatch.setattr(
+        retriever,
+        "extract_query_filters",
+        lambda _: retriever.QueryFilters(),
+    )
 
     # Call retrieve_context (without LLM rerank to simplify)
-    results = retriever.retrieve_context(
+    results, _filters = retriever.retrieve_context(
         "user_query",
         "client_123",
         rerank_with_model=False,
@@ -67,7 +72,7 @@ def test_version_comparison_retrieval(monkeypatch) -> None:
     monkeypatch.setattr(retriever, "embed_query", lambda q: [0.1])
     
     # Mock supabase rpc to return chunks from both v1 and v2
-    def fake_rpc(query, client, match_threshold, match_count):
+    def fake_rpc(*args, **kwargs):
         return [
             {"id": 1, "document_name": "A", "document_version": "v1", "chunk_text": "v1 text", "similarity": 0.5},
             {"id": 2, "document_name": "A", "document_version": "v1", "chunk_text": "v1 text", "similarity": 0.4},
@@ -75,9 +80,14 @@ def test_version_comparison_retrieval(monkeypatch) -> None:
         ]
     
     monkeypatch.setattr(retriever, "call_match_documents", fake_rpc)
+    monkeypatch.setattr(
+        retriever,
+        "extract_query_filters",
+        lambda _: retriever.QueryFilters(),
+    )
     
     # Ask a version comparison query
-    results = retriever.retrieve_context(
+    results, _filters = retriever.retrieve_context(
         "What changed between v1 and v2?",
         "client_1",
         rerank_with_model=False

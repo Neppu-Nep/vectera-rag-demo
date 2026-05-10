@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
 from typing import Generator
 
+
 @contextmanager
 def temp_file_from_bytes(file_bytes: bytes, suffix: str = ".pdf") -> Generator[str, None, None]:
     """Write bytes to a temporary file, yield the path, and clean up afterwards.

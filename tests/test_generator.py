@@ -19,9 +19,9 @@ def test_citation_format_validation() -> None:
 
         # Mock Responses API response to include a valid citation
         mock_client.responses.create.return_value = MagicMock(
-            output_text="Revenue was 10M [Acme, v1]."
+            output_text="Revenue was 10M [Acme | v1]."
         )
 
         answer = generate_answer("What was revenue?", chunks)
-        assert "[Acme, v1]" in answer
+        assert "[Acme | v1]" in answer
         assert mock_client.responses.create.call_count == 1

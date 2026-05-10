@@ -12,9 +12,13 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "streamlit>=1.57.0",
     "supabase>=2.30.0",
+    "tenacity>=9.0.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

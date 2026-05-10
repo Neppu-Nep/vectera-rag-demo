@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 from llama_cloud import LlamaCloud
+from llama_cloud.types.parsing_get_response import MarkdownPageMarkdownResultPage
 
 from src.core.logger import get_logger
 from src.utils.file_utils import temp_file_from_bytes
@@ -9,14 +10,14 @@ load_dotenv()
 logger = get_logger(__name__)
 
 
-def parse_financial_pdf(file_bytes: bytes) -> str:
+def parse_financial_pdf(file_bytes: bytes) -> list[str]:
     """Upload and parse a PDF synchronously using LlamaCloud.
 
     Args:
         file_bytes: File bytes in memory to parse.
 
     Returns:
-        The markdown string result from LlamaCloud.
+        A list of per-page markdown strings.
     """
     with temp_file_from_bytes(file_bytes) as tmp_path:
         logger.info("Initializing LlamaCloud for parsing...")
@@ -35,7 +36,7 @@ def parse_financial_pdf(file_bytes: bytes) -> str:
                 version="latest",
                 output_options={
                     "markdown": {
-                        "inline_images": False,
+                        "inline_images": True,
                         "tables": {
                             "output_tables_as_markdown": True,
                             "merge_continued_tables": True,
@@ -56,14 +57,21 @@ def parse_financial_pdf(file_bytes: bytes) -> str:
                         "extra_time_per_page_in_seconds": 2,
                     }
                 },
-                expand=["markdown_full"],
+                expand=["markdown"],
             )
 
             logger.info("Parsing Complete! Fetching results...")
-            full_text = result.markdown_full or ""
-            logger.debug(f"Preview of extracted text: {full_text[:500]}...")
-            return full_text
+            pages: list[str] = []
+            if not result.markdown:
+                logger.error("No markdown found in result")
+                return []
+
+            for page in result.markdown.pages:
+                if isinstance(page, MarkdownPageMarkdownResultPage) and page.markdown.strip():
+                    pages.append(page.markdown.strip())
+
+            return pages
 
         except Exception as e:
             logger.error(f"LlamaCloud API Error: {e}", exc_info=True)
-            return ""
+            return []

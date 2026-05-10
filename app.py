@@ -9,6 +9,13 @@ from src.retriever import retrieve_context
 logger = get_logger(__name__)
 
 
+def _format_score(value: object) -> float | None:
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        return None
+
+
 def init_session() -> None:
     """Initialize the Streamlit session state fields if not present.
 
@@ -25,6 +32,8 @@ def init_session() -> None:
         st.session_state.files_to_process = None
     if "uploader_key" not in st.session_state:
         st.session_state.uploader_key = 0
+    if "debug_mode" not in st.session_state:
+        st.session_state.debug_mode = False
 
 
 def handle_tenant_change() -> None:
@@ -48,6 +57,7 @@ def render_sidebar() -> None:
             on_change=handle_tenant_change,
             help="Demonstrating database-level row segregation. Documents uploaded to one tenant cannot be retrieved by another."
         )
+        st.toggle("Enable Retrieval Debug Mode", key="debug_mode")
 
         st.header("Upload Document")
         uploaded_files = st.file_uploader(
@@ -57,7 +67,9 @@ def render_sidebar() -> None:
             key=f"uploader_{st.session_state.uploader_key}"
         )
         if st.button("Process Documents", disabled=st.session_state.is_processing) and uploaded_files:
-            st.session_state.files_to_process = uploaded_files
+            st.session_state.files_to_process = [
+                {"name": f.name, "bytes": f.read()} for f in uploaded_files
+            ]
             st.session_state.is_processing = True
             st.session_state.uploader_key += 1
             st.rerun()
@@ -76,9 +88,10 @@ def render_chat() -> None:
                 with st.expander(f"View {len(msg['sources'])} sources used"):
                     for chunk in msg["sources"]:
                         doc_name = chunk.get("document_name", "Unknown Document")
-                        chunk_id = chunk.get("id", "N/A")
-                        text_full = chunk.get("chunk_text", "")
-                        with st.expander(f"{doc_name} (ID: {chunk_id})"):
+                        version = chunk.get("document_version", "Unknown")
+                        page_number = chunk.get("page_number", "N/A")
+                        text_full = chunk.get("raw_content") or chunk.get("chunk_text", "")
+                        with st.expander(f"**{doc_name} | {version} | Page {page_number}**"):
                             st.text(text_full)
 
     # Wait for user input
@@ -95,9 +108,22 @@ def render_chat() -> None:
                     client_id = st.session_state.client_id
                     # Retrieve from Supabase and rerank
                     logger.info(f"Processing query from {client_id}: {user_query}")
-                    chunks = retrieve_context(
+                    chunks, filters = retrieve_context(
                         user_query, client_id, rerank_with_model=True
                     )
+
+                filter_parts = []
+                if filters.years:
+                    filter_parts.append(f"Years: {filters.years}")
+                if filters.quarters:
+                    filter_parts.append(f"Quarters: {filters.quarters}")
+                if filters.companies:
+                    filter_parts.append(f"Companies: {filters.companies}")
+
+                if filter_parts:
+                    st.info("Active Filters Applied: " + " | ".join(filter_parts))
+                else:
+                    st.info("Active Filters Applied: None")
 
                 if not chunks:
                     answer = "I could not find any relevant information in the uploaded documents."
@@ -106,15 +132,41 @@ def render_chat() -> None:
                         answer = generate_answer(user_query, chunks)
 
                 st.markdown(answer)
+                st.feedback("thumbs")
 
                 if chunks:
                     with st.expander(f"View {len(chunks)} sources used"):
                         for chunk in chunks:
                             doc_name = chunk.get("document_name", "Unknown Document")
-                            chunk_id = chunk.get("id", "N/A")
-                            text_full = chunk.get("chunk_text", "")
-                            with st.expander(f"{doc_name} (ID: {chunk_id})"):
+                            version = chunk.get("document_version", "Unknown")
+                            page_number = chunk.get("page_number", "N/A")
+                            text_full = chunk.get("raw_content") or chunk.get("chunk_text", "")
+                            with st.expander(f"**{doc_name} | {version} | Page {page_number}**"):
                                 st.text(text_full)
+
+                if st.session_state.debug_mode:
+                    with st.expander("⚙️ Debug: Retrieval Metrics"):
+                        if not chunks:
+                            st.write("No retrieval metrics available.")
+                        else:
+                            rows = []
+                            for chunk in chunks:
+                                chunk_id = str(chunk.get("id", ""))[:8]
+                                rows.append(
+                                    {
+                                        "Chunk ID": chunk_id,
+                                        "Document": chunk.get(
+                                            "document_name", "Unknown Document"
+                                        ),
+                                        "Similarity": _format_score(
+                                            chunk.get("similarity")
+                                        ),
+                                        "RRF Score": _format_score(
+                                            chunk.get("rrf_score")
+                                        ),
+                                    }
+                                )
+                            st.dataframe(rows, use_container_width=True)
 
                 # Store the final assistant answer in session history
                 st.session_state.messages.append(
@@ -139,27 +191,28 @@ def process_pending_files() -> None:
 
     status_placeholder = st.empty()
     for f in st.session_state.files_to_process:
-        file_bytes = f.read()
-        with status_placeholder.status(f"Processing '{f.name}'..."):
+        file_bytes = f["bytes"]
+        filename = f["name"]
+        with status_placeholder.status(f"Processing '{filename}'..."):
             try:
                 # progress_cb writes into the status expander
-                result = ingest_pdf(file_bytes, f.name, client_id, progress_cb=lambda msg: st.write(f" - {msg}"))
+                result = ingest_pdf(file_bytes, filename, client_id, progress_cb=lambda msg: st.write(f" - {msg}"))
                 
                 if result.get("skipped"):
                     # If duplicate, treat as silent success
                     if result.get("reason") in ["file_sha256_exists", "text_sha256_exists"]:
-                        msg = f"Successfully processed {f.name}"
+                        msg = f"Successfully processed {filename}"
                         st.toast(msg, icon="✅")
                     else:
-                        msg = f"Skipped {f.name}: {result.get('reason')}"
+                        msg = f"Skipped {filename}: {result.get('reason')}"
                         st.warning(msg)
                 else:
                     inserted = result.get("inserted", 0)
-                    msg = f"Successfully processed {f.name}: {inserted} chunks inserted."
+                    msg = f"Successfully processed {filename}: {inserted} chunks inserted."
                     st.toast(msg, icon="✅")
             except Exception as e:
-                logger.error(f"Failed to ingest document {f.name}: {e}", exc_info=True)
-                st.error(f"Error processing '{f.name}'")
+                logger.error(f"Failed to ingest document {filename}: {e}", exc_info=True)
+                st.error(f"Error processing '{filename}'")
             finally:
                 # Clear the status expander before starting the next file or finishing
                 status_placeholder.empty()
