@@ -9,13 +9,6 @@ from src.retriever import retrieve_context
 logger = get_logger(__name__)
 
 
-def _format_score(value: object) -> float | None:
-    try:
-        return round(float(value), 3)
-    except (TypeError, ValueError):
-        return None
-
-
 def init_session() -> None:
     """Initialize the Streamlit session state fields if not present.
 
@@ -129,7 +122,8 @@ def render_chat() -> None:
                     answer = "I could not find any relevant information in the uploaded documents."
                 else:
                     with st.spinner("Thinking..."):
-                        answer = generate_answer(user_query, chunks)
+                        # Pass the is_comparison flag from the filters to the generator
+                        answer = generate_answer(user_query, chunks, is_comparison=filters.is_comparison)
 
                 st.markdown(answer)
                 st.feedback("thumbs")
@@ -158,15 +152,11 @@ def render_chat() -> None:
                                         "Document": chunk.get(
                                             "document_name", "Unknown Document"
                                         ),
-                                        "Similarity": _format_score(
-                                            chunk.get("similarity")
-                                        ),
-                                        "RRF Score": _format_score(
-                                            chunk.get("rrf_score")
-                                        ),
+                                        "Similarity": round(chunk.get("similarity", 0), 3),
+                                        "RRF Score": round(chunk.get("rrf_score", 0), 3),
                                     }
                                 )
-                            st.dataframe(rows, use_container_width=True)
+                            st.dataframe(rows, width='stretch')
 
                 # Store the final assistant answer in session history
                 st.session_state.messages.append(

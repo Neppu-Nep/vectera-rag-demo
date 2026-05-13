@@ -46,19 +46,21 @@ DECLARE
   doc_ver TEXT;
   rep_year INT;
   rep_quarter TEXT;
+  doc_type TEXT;
 BEGIN
-  SELECT document_name, company_name, document_version, report_year, report_quarter
-  INTO doc_name, comp_name, doc_ver, rep_year, rep_quarter
+  SELECT document_name, company_name, document_version, report_year, report_quarter, document_type
+  INTO doc_name, comp_name, doc_ver, rep_year, rep_quarter, doc_type
   FROM documents WHERE id = NEW.document_id;
   
   NEW.search_tsv := 
-    setweight(to_tsvector('english', COALESCE(comp_name, '') || ' ' || COALESCE(doc_name, '') || ' ' || COALESCE(doc_ver, '') || ' ' || COALESCE(rep_year::TEXT, '') || ' ' || COALESCE(rep_quarter, '')), 'A') || 
+    setweight(to_tsvector('english', COALESCE(comp_name, '') || ' ' || COALESCE(doc_name, '') || ' ' || COALESCE(doc_ver, '') || ' ' || COALESCE(rep_year::TEXT, '') || ' ' || COALESCE(rep_quarter, '') || ' ' || COALESCE(doc_type, '')), 'A') || 
     setweight(to_tsvector('english', COALESCE(NEW.chunk_text, '')), 'B') ||
     setweight(to_tsvector('english', COALESCE(NEW.raw_content, '')), 'C');
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS tr_document_chunks_tsvector_update ON document_chunks;
 CREATE TRIGGER tr_document_chunks_tsvector_update
 BEFORE INSERT OR UPDATE ON document_chunks
 FOR EACH ROW EXECUTE FUNCTION document_chunks_generate_tsvector();
@@ -71,19 +73,21 @@ DECLARE
   doc_ver TEXT;
   rep_year INT;
   rep_quarter TEXT;
+  doc_type TEXT;
 BEGIN
   IF OLD.document_name IS DISTINCT FROM NEW.document_name
     OR OLD.company_name IS DISTINCT FROM NEW.company_name
     OR OLD.document_version IS DISTINCT FROM NEW.document_version
     OR OLD.report_year IS DISTINCT FROM NEW.report_year
-    OR OLD.report_quarter IS DISTINCT FROM NEW.report_quarter THEN
-    SELECT document_name, company_name, document_version, report_year, report_quarter
-    INTO doc_name, comp_name, doc_ver, rep_year, rep_quarter
+    OR OLD.report_quarter IS DISTINCT FROM NEW.report_quarter 
+    OR OLD.document_type IS DISTINCT FROM NEW.document_type THEN
+    SELECT document_name, company_name, document_version, report_year, report_quarter, document_type
+    INTO doc_name, comp_name, doc_ver, rep_year, rep_quarter, doc_type
     FROM documents WHERE id = NEW.id;
 
     UPDATE document_chunks c
     SET search_tsv =
-      setweight(to_tsvector('english', COALESCE(comp_name, '') || ' ' || COALESCE(doc_name, '') || ' ' || COALESCE(doc_ver, '') || ' ' || COALESCE(rep_year::TEXT, '') || ' ' || COALESCE(rep_quarter, '')), 'A') ||
+      setweight(to_tsvector('english', COALESCE(comp_name, '') || ' ' || COALESCE(doc_name, '') || ' ' || COALESCE(doc_ver, '') || ' ' || COALESCE(rep_year::TEXT, '') || ' ' || COALESCE(rep_quarter, '') || ' ' || COALESCE(doc_type, '')), 'A') ||
       setweight(to_tsvector('english', COALESCE(c.chunk_text, '')), 'B') ||
       setweight(to_tsvector('english', COALESCE(c.raw_content, '')), 'C')
     WHERE c.document_id = NEW.id;
@@ -92,6 +96,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS tr_documents_name_change ON documents;
 CREATE TRIGGER tr_documents_name_change
 AFTER UPDATE ON documents
 FOR EACH ROW EXECUTE FUNCTION documents_propagate_name_change();
@@ -139,10 +144,9 @@ BEGIN
       AND (filter_years IS NULL OR d.report_year = ANY(filter_years))
       AND (filter_quarters IS NULL OR d.report_quarter = ANY(filter_quarters))
       AND (filter_companies IS NULL OR d.company_name = ANY(filter_companies))
-      AND (filter_document_types IS NULL OR d.document_type = ANY(filter_document_types))
       AND 1 - (c.embedding <=> query_embedding) > match_threshold
     ORDER BY c.embedding <=> query_embedding
-    LIMIT 100
+    LIMIT 200
   ),
   keyword_matches AS (
     SELECT
@@ -155,10 +159,9 @@ BEGIN
       AND (filter_years IS NULL OR d.report_year = ANY(filter_years))
       AND (filter_quarters IS NULL OR d.report_quarter = ANY(filter_quarters))
       AND (filter_companies IS NULL OR d.company_name = ANY(filter_companies))
-      AND (filter_document_types IS NULL OR d.document_type = ANY(filter_document_types))
       AND (user_query IS NULL OR c.search_tsv @@ plainto_tsquery('english', user_query))
     ORDER BY rank_score DESC
-    LIMIT 100
+    LIMIT 200
   )
   SELECT
     COALESCE(v.id, k.id) AS id,
@@ -173,8 +176,9 @@ BEGIN
     c.raw_content,
     c.page_number,
     COALESCE(v.similarity, 0.0::FLOAT) AS similarity,
-    ((CASE WHEN v.rank_vector IS NOT NULL THEN 1.0 / (60 + v.rank_vector) ELSE 0 END) +
-    (CASE WHEN k.rank_keyword IS NOT NULL THEN 1.0 / (60 + k.rank_keyword) ELSE 0 END))::FLOAT AS rrf_score
+    (((CASE WHEN v.rank_vector IS NOT NULL THEN 1.0 / (60 + v.rank_vector) ELSE 0 END) +
+    (CASE WHEN k.rank_keyword IS NOT NULL THEN 1.0 / (60 + k.rank_keyword) ELSE 0 END)) *
+    (CASE WHEN filter_document_types IS NOT NULL AND d.document_type = ANY(filter_document_types) THEN 1.25 ELSE 1.0 END))::FLOAT AS rrf_score
   FROM vector_matches v
   FULL OUTER JOIN keyword_matches k ON v.id = k.id
   JOIN document_chunks c ON c.id = COALESCE(v.id, k.id)

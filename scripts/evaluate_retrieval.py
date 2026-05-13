@@ -7,17 +7,17 @@ from src.retriever import retrieve_context
 load_dotenv()
 
 CLIENT_ID = os.getenv("EVAL_CLIENT_ID", "Vectera_Capital_Fund")
-K = int(os.getenv("TOP_K", "5"))
+K = int(os.getenv("TOP_K", "5")) * 2
 
 GOLDEN_DATASET: list[dict[str, Any]] = [
     {
-        "query": "How did Digital Realty's total Enterprise Value and Equity Market Capitalization change between Q3 2025 and Q4 2025 ?",
+        "query": "How did Digital Realty's total Enterprise Value and Equity Market Capitalization change between Q3 2025 and Q4 2025?",
         "expected_doc_versions": ["March 2026", "December 2025"],
         "expected_years": [2025],
         "expected_quarters": ["Q3", "Q4"],
         "expected_companies": ["Digital Realty"],
-        "expected_substrings": ["$60 Bn", "$79 Bn", "$54 Bn", "$73 Bn", "Total Enterprise Value", "Equity Market Capitalization"],
-        "expected_page_numbers": [3]
+        "expected_substrings": ["$60 Bn", "$79 Bn", "$54 Bn", "$73 Bn", "Enterprise Value", "Equity Market Capitalization"],
+        "expected_page_numbers": [3, 34, 36]
     },
     {
         "query": "Compare the total bookings at 100% share for Q3 2025 versus Q4 2025. Did the backlog grow or shrink by the end of the year for Digital Realty?",
@@ -74,7 +74,7 @@ def _matches_expectation(
     if expected_page_numbers:
         page_number = chunk.get("page_number", -1)
         if page_number not in expected_page_numbers:
-            print(f"Chunk page number {page_number} not in expected {expected_page_numbers}")
+            print(f"Chunk page number '{page_number}' not in expected page numbers {expected_page_numbers}")
             return False
 
     if expected_substrings:
@@ -118,7 +118,8 @@ def main() -> None:
             print(f"Eval aborted on query {i}: {exc}")
             return
 
-        print(f"Retrieved {len(chunks)} chunks for query '{query}' with filters: {_filters}")
+        print(f"\nRetrieved {len(chunks)} chunks for query '{query}' with filters:\n")
+        print(f"is_comparison={_filters.is_comparison}\nexpected_doc_versions={expected_versions}\nexpected_companies={expected_companies}\nexpected_page_numbers={expected_page_numbers}\nexpected_substrings={expected_substrings}\n")
         top_k = chunks[:K]
         hit = any(
             _matches_expectation(

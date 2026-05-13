@@ -15,4 +15,4 @@ def get_supabase_client() -> Client:
 @lru_cache(maxsize=1)
 def get_openai_client() -> OpenAI:
     """Initialize and retrieve a cached OpenAI client."""
-    return OpenAI()
+    return OpenAI(api_key=settings.openai_api_key)

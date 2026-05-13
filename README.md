@@ -1,6 +1,9 @@
-# Vectera.ai RAG System (V2)
+# Vectera.ai RAG System (V3)
 
-This repository contains a specialized Retrieval-Augmented Generation (RAG) pipeline built to ingest messy financial investment materials (slide decks and long-form reports), store high-dimensional embeddings, and execute citation-aware generation. The V2 system has been significantly upgraded to improve retrieval quality beyond vector similarity, implement adaptive chunking, handle version conflicts, and expose retrieval behavior for rigorous evaluation.
+This repository contains an enterprise-grade Retrieval-Augmented Generation (RAG) pipeline built to ingest messy financial investment materials (slide decks and long-form reports), store high-dimensional embeddings, and execute citation-aware generation. 
+
+V2 - significantly upgraded to improve retrieval quality beyond vector similarity, implement adaptive chunking, handle version conflicts, and expose retrieval behavior for rigorous evaluation.
+V3 - focuses heavily on fault-tolerant retrieval, query expansion, and explicit conflict resolution across different versions of institutional financial data.
 
 ## System Architecture
 
@@ -22,16 +25,20 @@ flowchart LR
     end
 
     subgraph Retrieval Pipeline
-        H[LLM Filter Extraction] --> I[SQL Metadata Pre-Filter]
-        I --> J[Hybrid Search + RRF]
-        J --> K[LLM Reranker]
+        H[LLM Router: Query Expansion & Metadata] --> I{Phase 1: Strict DB Fetch}
+        I -->|Zero Results| J[Phase 2: Fallback DB Fetch]
+        I -->|Results| K[Reciprocal Rank Fusion]
+        J --> K
+        K --> L[LLM Cross-Encoder Reranker]
     end
 
     subgraph Generation
-        K --> L[Aggregated Answer with Citations]
+        L --> M[Grouped Context Assembly]
+        M --> N[Aggregated Answer with Conflict Resolution]
     end
 
-    G --> J
+    G <--> I
+    G <--> J
 ```
 
 **Configuration Defaults:**
@@ -41,53 +48,45 @@ flowchart LR
 
 ## Core Infrastructure & Trade-Offs
 
-### 1. Database, Multi-Tenancy & Scaling Strategy (Supabase)
-We use Postgres with `pgvector` and `tsvector` to demonstrate enterprise readiness and handle complex metadata filtering.
-*   **The Multi-Tenant Flex:** Client access control is maintained via a strict `client_id` column in the `documents` table, enforced through Postgres RPC (`match_documents`).
-*   **Scaling Path:** At material scale (millions of chunks), exact cosine similarity degrades to full table scans. We rely on an **HNSW (Hierarchical Navigable Small World)** index in pgvector to keep latency low. If corpus size and tenant count grow significantly, three architectural additions become critical:
-    1.  **Native partitioning** by `client_id` to avoid global table scans.
-    2.  **Supabase Row Level Security (RLS)** to enforce isolation at the DB authentication layer.
-    3.  **Batch index update queue** for HNSW maintenance, avoiding synchronous index churn on every upload.
+### 1. Database, Multi-Tenancy & Scaling Strategy
+We use Postgres with `pgvector` and `tsvector` to handle complex metadata filtering and hybrid search.
+*   **Row-Level Tenant Isolation:** Client access control is maintained via a strict `client_id` column in the `documents` table, enforced directly through the Postgres RPC.
+*   **Scaling Path:** At material scale, exact cosine similarity degrades to full table scans. We rely on an **HNSW (Hierarchical Navigable Small World)** index. If the corpus scales to millions of chunks across hundreds of tenants, the architecture must transition to native Postgres partitioning by `client_id` and implement a batch index update queue to prevent synchronous CPU churn during document uploads.
 
 ### 2. Adaptive Chunking by Document Type
-Standard open-source RAG systems destroy structured financial data by applying one-size-fits-all character splitters. We extract `document_type` during ingestion and route accordingly:
-*   **Presentations:** Slide-level chunks. If a slide contains a table, we use an LLM to generate a dense 3-sentence summary of the metrics for vector embedding, while preserving the raw markdown table for exact numeric grounding during generation.
-*   **Financial Reports:** Bounded plain-text chunking (4000 chars, 400 overlap) using LangChain's Markdown splitter. This prevents the failure mode where a full 50-page report is passed through a "summarize slide" path.
+Standard open-source RAG systems destroy structured financial data by applying one-size-fits-all character splitters. We extract `document_type` during ingestion and route accordingly.
+*   **Presentations:** Slide-level chunks. If a slide contains a table, we use an LLM to generate a dense 3-sentence summary of the metrics for vector embedding, while preserving the raw markdown table for exact numeric grounding.
+*   **Financial Reports:** Bounded plain-text chunking (4000 chars, 400 overlap) using LangChain's Markdown splitter. 
 
-### 3. 3-Stage Retrieval Pipeline
-To improve retrieval quality beyond straightforward vector similarity, we bridge the lexical gap between dense vectors and exact financial metrics:
-*   **Stage 1 (Metadata Extraction):** An LLM parses the user query to extract exact metadata filters (`report_year`, `report_quarter`, `company_name`). We currently use exact matching (`=`) for company names.
-*   **Stage 2 (Hybrid Search + RRF):** We combine dense semantic vectors (cosine similarity) with Postgres full-text keyword search (`tsvector`), merging results using Reciprocal Rank Fusion (RRF). This catches exact names and version labels while keeping semantic recall. *(Tradeoff: Each branch caps candidates at 100 before fusion. In production, fusion should move closer to the engine layer to avoid early truncation.)*
-*   **Stage 3 (LLM Reranking):** A lightweight reasoning model acts as a relevance judge. It reads the top candidate payloads and passes only the most strictly relevant chunks to the final generation model.
+### 3. Fault-Tolerant Retrieval & Hybrid Search
+We bridge the lexical gap between dense vectors and exact financial metrics using a multi-phase, expanded pipeline.
+*   **Query Expansion:** The router generates 3 variations of the user's intent using financial synonyms to maximize recall.
+*   **Soft Target Fusion:** Strict SQL filtering leads to catastrophic failures if a user casually refers to a "presentation" as a "report". We apply temporal and document-type filters as a 1.25x multiplicative boost during Reciprocal Rank Fusion (RRF) rather than strict `WHERE` exclusions.
+*   **Graceful Degradation (Fallback):** If Phase 1 (strict temporal targeting) yields 0 chunks, the system automatically drops the year and quarter filters and re-queries the database.
+*   **LLM Cross-Encoder:** A lightweight reasoning model scores the fused candidates (0 to 10), acting as a precision sniper to filter out noise before generation.
 
-## Handling Real-World Complexity
+### 4. Forgiving Generation & Conflict Resolution
+The system handles multiple versions of the same company's materials (e.g., Q3 vs Q4 guidance) without blindly averaging conflicting metrics.
+*   **Context Grouping:** Chunks are hierarchically grouped by `company` and `document_version` before entering the context window.
+*   **Single-Pass Reasoning:** The generator prompt detects comparison queries and explicitly instructs the LLM to output Markdown tables and calculate deltas. 
+*   **Trade-off:** We use a single-pass `<thinking>` block for speed (Time-To-First-Token < 5s). For massive document families, a true Multi-Agent orchestration (Agent A reads Q3, Agent B reads Q4, Agent C resolves) would be more robust against context limit saturation, but would increase latency.
 
-### Version Awareness & Conflict Resolution
-The system is explicitly designed to handle multiple versions of the same company's materials without blindly averaging conflicting metrics.
-*   **Indexing Strategy:** We extract `report_year`, `report_quarter`, and `document_version` at ingestion. At retrieval, the SQL `WHERE` clause applies LLM-extracted filters *before* vector math. This prevents mixing 2025/Q3 and 2026/Q4 data in the same context window unintentionally.
-*   **Comparison Queries:** For explicit comparisons (e.g., "compare Q3 and Q4"), the retrieval dynamically broadens recall (threshold dropped to `0.0` and fetch count doubled).
-*   **Generation Constraints:** The generation model is explicitly prompted to present conflicts directly (e.g., "Source A says X. Source B says Y") rather than averaging conflicting numbers.
-
-### Retrieval Evaluation & Validation
-To validate that retrieval is returning the "right" chunks consistently:
-*   **UI Debugging:** Streamlit exposes a Debug Mode showing Similarity and RRF scores per chunk.
-*   **Offline Golden Eval:** We include `scripts/evaluate_retrieval.py`, an automated harness that computes Hit Rate@K by checking whether expected `(company, document_version)` tuples appear in top-K results.
-*   **"Lost in the Middle" Mitigation:** Large Language Models often suffer from 'Lost in the Middle' syndrome, where they ignore context placed in the center of a long prompt. To counter this, the generator.py implements a chunk reordering algorithm that places the highest-scoring retrieved chunks at the very beginning and very end of the context window, ensuring the LLM pays attention to the most critical data.
-*   **Concurrency / Latency Optimization:** To keep retrieval latency low, the system concurrently executes the OpenAI vector embedding request and the LLM query filter extraction (extract_query_filters) using a ThreadPoolExecutor.
+## Validation & Evaluation
+To mathematically validate that retrieval returns the "right" chunks consistently:
+*   **Offline Golden Eval:** We run `scripts/evaluate_retrieval.py`, an automated harness that computes Hit Rate@K by verifying if expected `(company, document_version)` tuples, specific page numbers, and exact string substrings appear in top-K results.
+*   **UI Debugging:** Streamlit exposes a Debug Mode showing Similarity scores, RRF scores, and Reranker logic per chunk.
 
 ## Known Limitations
-
 *   **Synchronous Processing:** The current implementation uses a synchronous `ThreadPoolExecutor` for chunk summarization and blocks the UI during ingestion.
 *   **Charts/Visuals:** LlamaCloud inline images are parsed but not converted into VLM-generated alt-text summaries for embedding.
 *   **Repetitive Boilerplate:** Many PDFs repeat safe-harbor/disclaimer blocks. Future ingestion should strip repetitive headers/footers before embedding to reduce vector noise.
 *   **Strict Company Name Matching:** The LLM extraction currently relies on exact matching for company names. If the user query has a slight variation, it may fail to retrieve documents.
 
 ## What I Would Improve With More Time
-
-1.  **Entity Resolution (Master Database):** Implement a canonical company name resolution step. After extracting the raw company name from the user query, cross-reference it against a master database (e.g., mapping "Digital Realty" or "DLR" to a canonical standard ID) before passing it to the `match_documents` RPC.
-2.  **Multi-Turn Conversational State:** Build a Query Contextualization pipeline to rewrite conversational fragments into standalone, context-complete search queries.
-3.  **LLM-as-a-Judge Evaluation:** Expand the offline evaluation harness to include metrics for context precision, recall, and groundedness (e.g., RAGAS/TruLens) beyond simple metadata hits.
-4.  **Asynchronous Task Queues:** Decouple ingestion from the frontend using a message broker (Redis) and background workers (Celery/FastAPI) so users can chat while documents ingest.
+1.  **Dedicated Reranker API:** Replace the generalized LLM Cross-Encoder prompt with a dedicated reranking model (e.g., Cohere Rerank 3) to reduce token costs and improve latency.
+2.  **Entity Resolution (Master Database):** Implement a canonical company name resolution step mapping raw query strings (e.g., "DLR") to standard IDs before DB execution.
+3.  **Asynchronous Task Queues:** Decouple the `ingest_pdf` function from the Streamlit frontend using Redis and Celery so users can chat seamlessly while heavy PDFs process in the background.
+4.  **RAGAS Evaluation Integration:** Expand the offline evaluation harness beyond simple metadata hits to measure context precision, recall, and groundedness using the RAGAS or TruLens frameworks.
 
 ---
 

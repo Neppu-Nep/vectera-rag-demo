@@ -12,6 +12,9 @@ def require_env(name: str) -> str:
 
 class Config:
     """Centralized configuration manager for the RAG project."""
+    @property
+    def openai_api_key(self) -> str:
+        return require_env("OPENAI_API_KEY")
 
     @property
     def supabase_url(self) -> str:

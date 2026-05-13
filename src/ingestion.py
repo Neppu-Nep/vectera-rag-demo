@@ -29,7 +29,7 @@ class MetadataResponse(BaseModel):
     document_version: str
     report_year: int | None = None
     report_quarter: str | None = None
-    document_type: DocType | None = None
+    document_type: DocType = "Other"
 
 
 def check_duplicate(client_id: str, column: str, value: str) -> bool:
@@ -101,7 +101,7 @@ def extract_metadata(pages: list[str], filename: str) -> dict[str, Any]:
     document_version = "Unknown"
     report_year: int | None = None
     report_quarter: str | None = None
-    document_type: DocType | None = None
+    document_type: DocType = "Other"
 
     try:
         resp = openai_client.responses.parse(
