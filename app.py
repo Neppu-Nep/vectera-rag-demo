@@ -44,22 +44,25 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.header("Settings")
         st.selectbox(
-            "Active Tenant Scope", 
+            "Active Tenant Scope",
             options=["Vectera_Capital_Fund", "Rival_Private_Equity", "Default_Client"],
             key="client_id",
             on_change=handle_tenant_change,
-            help="Demonstrating database-level row segregation. Documents uploaded to one tenant cannot be retrieved by another."
+            help="Demonstrating database-level row segregation. Documents uploaded to one tenant cannot be retrieved by another.",
         )
         st.toggle("Enable Retrieval Debug Mode", key="debug_mode")
 
         st.header("Upload Document")
         uploaded_files = st.file_uploader(
-            "Choose a PDF document", 
-            type=["pdf"], 
+            "Choose a PDF document",
+            type=["pdf"],
             accept_multiple_files=True,
-            key=f"uploader_{st.session_state.uploader_key}"
+            key=f"uploader_{st.session_state.uploader_key}",
         )
-        if st.button("Process Documents", disabled=st.session_state.is_processing) and uploaded_files:
+        if (
+            st.button("Process Documents", disabled=st.session_state.is_processing)
+            and uploaded_files
+        ):
             st.session_state.files_to_process = [
                 {"name": f.name, "bytes": f.read()} for f in uploaded_files
             ]
@@ -83,14 +86,19 @@ def render_chat() -> None:
                         doc_name = chunk.get("document_name", "Unknown Document")
                         version = chunk.get("document_version", "Unknown")
                         page_number = chunk.get("page_number", "N/A")
-                        text_full = chunk.get("raw_content") or chunk.get("chunk_text", "")
-                        with st.expander(f"**{doc_name} | {version} | Page {page_number}**"):
+                        text_full = chunk.get("raw_content") or chunk.get(
+                            "chunk_text", ""
+                        )
+                        with st.expander(
+                            f"**{doc_name} | {version} | Page {page_number}**"
+                        ):
                             st.text(text_full)
 
-    # Wait for user input
-    user_query = st.chat_input("Ask a question about your documents...", disabled=st.session_state.is_processing)
+    user_query = st.chat_input(
+        "Ask a question about your documents...",
+        disabled=st.session_state.is_processing,
+    )
     if user_query:
-        # Add user query to history and render it immediately
         st.session_state.messages.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
@@ -122,8 +130,9 @@ def render_chat() -> None:
                     answer = "I could not find any relevant information in the uploaded documents."
                 else:
                     with st.spinner("Thinking..."):
-                        # Pass the is_comparison flag from the filters to the generator
-                        answer = generate_answer(user_query, chunks, is_comparison=filters.is_comparison)
+                        answer = generate_answer(
+                            user_query, chunks, is_comparison=filters.is_comparison
+                        )
 
                 st.markdown(answer)
                 st.feedback("thumbs")
@@ -134,8 +143,12 @@ def render_chat() -> None:
                             doc_name = chunk.get("document_name", "Unknown Document")
                             version = chunk.get("document_version", "Unknown")
                             page_number = chunk.get("page_number", "N/A")
-                            text_full = chunk.get("raw_content") or chunk.get("chunk_text", "")
-                            with st.expander(f"**{doc_name} | {version} | Page {page_number}**"):
+                            text_full = chunk.get("raw_content") or chunk.get(
+                                "chunk_text", ""
+                            )
+                            with st.expander(
+                                f"**{doc_name} | {version} | Page {page_number}**"
+                            ):
                                 st.text(text_full)
 
                 if st.session_state.debug_mode:
@@ -152,13 +165,16 @@ def render_chat() -> None:
                                         "Document": chunk.get(
                                             "document_name", "Unknown Document"
                                         ),
-                                        "Similarity": round(chunk.get("similarity", 0), 3),
-                                        "RRF Score": round(chunk.get("rrf_score", 0), 3),
+                                        "Similarity": round(
+                                            chunk.get("similarity", 0), 3
+                                        ),
+                                        "RRF Score": round(
+                                            chunk.get("rrf_score", 0), 3
+                                        ),
                                     }
                                 )
-                            st.dataframe(rows, width='stretch')
+                            st.dataframe(rows, width="stretch")
 
-                # Store the final assistant answer in session history
                 st.session_state.messages.append(
                     {"role": "assistant", "content": answer, "sources": chunks}
                 )
@@ -185,12 +201,19 @@ def process_pending_files() -> None:
         filename = f["name"]
         with status_placeholder.status(f"Processing '{filename}'..."):
             try:
-                # progress_cb writes into the status expander
-                result = ingest_pdf(file_bytes, filename, client_id, progress_cb=lambda msg: st.write(f" - {msg}"))
-                
+                result = ingest_pdf(
+                    file_bytes,
+                    filename,
+                    client_id,
+                    progress_cb=lambda msg: st.write(f" - {msg}"),
+                )
+
                 if result.get("skipped"):
                     # If duplicate, treat as silent success
-                    if result.get("reason") in ["file_sha256_exists", "text_sha256_exists"]:
+                    if result.get("reason") in [
+                        "file_sha256_exists",
+                        "text_sha256_exists",
+                    ]:
                         msg = f"Successfully processed {filename}"
                         st.toast(msg, icon="✅")
                     else:
@@ -201,15 +224,16 @@ def process_pending_files() -> None:
                     msg = f"Successfully processed {filename}: {inserted} chunks inserted."
                     st.toast(msg, icon="✅")
             except Exception as e:
-                logger.error(f"Failed to ingest document {filename}: {e}", exc_info=True)
+                logger.error(
+                    f"Failed to ingest document {filename}: {e}", exc_info=True
+                )
                 st.error(f"Error processing '{filename}'")
             finally:
-                # Clear the status expander before starting the next file or finishing
                 status_placeholder.empty()
 
     st.session_state.files_to_process = None
     st.session_state.is_processing = False
-    
+
     # Give the user time to see the last toast before the app reruns and refreshes the UI
     time.sleep(2)
     st.rerun()

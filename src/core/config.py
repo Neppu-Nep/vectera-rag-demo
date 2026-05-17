@@ -12,6 +12,7 @@ def require_env(name: str) -> str:
 
 class Config:
     """Centralized configuration manager for the RAG project."""
+
     @property
     def openai_api_key(self) -> str:
         return require_env("OPENAI_API_KEY")
@@ -23,6 +24,14 @@ class Config:
     @property
     def supabase_service_key(self) -> str:
         return require_env("SUPABASE_SERVICE_KEY")
+
+    @property
+    def reducto_api_key(self) -> str:
+        return require_env("REDUCTO_API_KEY")
+
+    @property
+    def serpapi_api_key(self) -> str:
+        return require_env("SERPAPI_API_KEY")
 
     @property
     def embedding_model(self) -> str:

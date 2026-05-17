@@ -1,7 +1,75 @@
 -- Extensions
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- Tables
+CREATE TABLE IF NOT EXISTS companies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  canonical_name TEXT UNIQUE NOT NULL,
+  aliases TEXT[] DEFAULT '{}',
+  description TEXT,
+  search_text TEXT,
+  embedding VECTOR(1536)
+);
+
+CREATE INDEX IF NOT EXISTS companies_search_trgm_idx ON companies USING GIN (search_text gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS companies_embedding_hnsw_idx ON companies USING hnsw (embedding vector_cosine_ops);
+
+CREATE OR REPLACE FUNCTION companies_generate_search_text()
+RETURNS trigger AS $$
+BEGIN
+  NEW.search_text := concat_ws(
+    ' ',
+    NEW.canonical_name,
+    array_to_string(COALESCE(NEW.aliases, ARRAY[]::text[]), ' ')
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tr_companies_search_text ON companies;
+CREATE TRIGGER tr_companies_search_text
+BEFORE INSERT OR UPDATE ON companies
+FOR EACH ROW EXECUTE FUNCTION companies_generate_search_text();
+
+CREATE OR REPLACE FUNCTION resolve_company_aliases(
+  raw_query TEXT,
+  query_emb VECTOR(1536),
+  trgm_threshold FLOAT DEFAULT 0.8
+)
+RETURNS TABLE (canonical TEXT)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT DISTINCT c.canonical_name
+  FROM companies c
+  WHERE 
+    strict_word_similarity(raw_query, c.search_text) > trgm_threshold
+    OR raw_query ILIKE ANY(c.aliases)
+    OR 1 - (c.embedding <=> query_emb) > 0.8
+  ORDER BY c.canonical_name;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION resolve_company_aliases_strict(
+  raw_query TEXT,
+  trgm_threshold FLOAT DEFAULT 0.7
+)
+RETURNS TABLE (canonical TEXT)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT DISTINCT c.canonical_name
+  FROM companies c
+  WHERE 
+    strict_word_similarity(raw_query, c.search_text) > trgm_threshold
+    OR raw_query ILIKE ANY(c.aliases)
+  ORDER BY c.canonical_name;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id TEXT NOT NULL,
@@ -11,6 +79,7 @@ CREATE TABLE IF NOT EXISTS documents (
   document_version TEXT,
   report_year INT,
   report_quarter TEXT,
+  as_of_date DATE,
   file_sha256 TEXT,
   text_sha256 TEXT,
   status TEXT DEFAULT 'INGESTING',
@@ -26,8 +95,12 @@ CREATE TABLE IF NOT EXISTS document_chunks (
   raw_content TEXT,
   page_number INT,
   embedding VECTOR(1536),
-  search_tsv tsvector
+  search_tsv tsvector,
+  mentioned_companies TEXT[] DEFAULT '{}'
 );
+
+CREATE INDEX IF NOT EXISTS document_chunks_mentioned_companies_idx
+ON document_chunks USING GIN (mentioned_companies);
 
 -- Indexes + search vectors
 CREATE INDEX IF NOT EXISTS document_chunks_embedding_hnsw_idx
@@ -54,6 +127,7 @@ BEGIN
   
   NEW.search_tsv := 
     setweight(to_tsvector('english', COALESCE(comp_name, '') || ' ' || COALESCE(doc_name, '') || ' ' || COALESCE(doc_ver, '') || ' ' || COALESCE(rep_year::TEXT, '') || ' ' || COALESCE(rep_quarter, '') || ' ' || COALESCE(doc_type, '')), 'A') || 
+    setweight(to_tsvector('english', COALESCE(array_to_string(NEW.mentioned_companies, ' '), '')), 'A') ||
     setweight(to_tsvector('english', COALESCE(NEW.chunk_text, '')), 'B') ||
     setweight(to_tsvector('english', COALESCE(NEW.raw_content, '')), 'C');
   RETURN NEW;
@@ -88,6 +162,7 @@ BEGIN
     UPDATE document_chunks c
     SET search_tsv =
       setweight(to_tsvector('english', COALESCE(comp_name, '') || ' ' || COALESCE(doc_name, '') || ' ' || COALESCE(doc_ver, '') || ' ' || COALESCE(rep_year::TEXT, '') || ' ' || COALESCE(rep_quarter, '') || ' ' || COALESCE(doc_type, '')), 'A') ||
+      setweight(to_tsvector('english', COALESCE(array_to_string(c.mentioned_companies, ' '), '')), 'A') ||
       setweight(to_tsvector('english', COALESCE(c.chunk_text, '')), 'B') ||
       setweight(to_tsvector('english', COALESCE(c.raw_content, '')), 'C')
     WHERE c.document_id = NEW.id;
@@ -121,6 +196,7 @@ RETURNS TABLE (
   document_type TEXT,
   report_year INT,
   report_quarter TEXT,
+  as_of_date DATE,
   created_at TIMESTAMPTZ,
   chunk_text TEXT,
   raw_content TEXT,
@@ -143,7 +219,11 @@ BEGIN
     WHERE d.client_id = filter_client_id
       AND (filter_years IS NULL OR d.report_year = ANY(filter_years))
       AND (filter_quarters IS NULL OR d.report_quarter = ANY(filter_quarters))
-      AND (filter_companies IS NULL OR d.company_name = ANY(filter_companies))
+      AND (
+        filter_companies IS NULL
+        OR d.company_name = ANY(filter_companies)
+        OR c.mentioned_companies && filter_companies
+      )
       AND 1 - (c.embedding <=> query_embedding) > match_threshold
     ORDER BY c.embedding <=> query_embedding
     LIMIT 200
@@ -158,7 +238,11 @@ BEGIN
     WHERE d.client_id = filter_client_id
       AND (filter_years IS NULL OR d.report_year = ANY(filter_years))
       AND (filter_quarters IS NULL OR d.report_quarter = ANY(filter_quarters))
-      AND (filter_companies IS NULL OR d.company_name = ANY(filter_companies))
+      AND (
+        filter_companies IS NULL
+        OR d.company_name = ANY(filter_companies)
+        OR c.mentioned_companies && filter_companies
+      )
       AND (user_query IS NULL OR c.search_tsv @@ plainto_tsquery('english', user_query))
     ORDER BY rank_score DESC
     LIMIT 200
@@ -171,14 +255,25 @@ BEGIN
     d.document_type,
     d.report_year, 
     d.report_quarter,
+    d.as_of_date,
     d.created_at,
     c.chunk_text,
     c.raw_content,
     c.page_number,
     COALESCE(v.similarity, 0.0::FLOAT) AS similarity,
-    (((CASE WHEN v.rank_vector IS NOT NULL THEN 1.0 / (60 + v.rank_vector) ELSE 0 END) +
-    (CASE WHEN k.rank_keyword IS NOT NULL THEN 1.0 / (60 + k.rank_keyword) ELSE 0 END)) *
-    (CASE WHEN filter_document_types IS NOT NULL AND d.document_type = ANY(filter_document_types) THEN 1.25 ELSE 1.0 END))::FLOAT AS rrf_score
+    (
+      ((CASE WHEN v.rank_vector IS NOT NULL THEN 1.0 / (60 + v.rank_vector) ELSE 0 END) +
+       (CASE WHEN k.rank_keyword IS NOT NULL THEN 1.0 / (60 + k.rank_keyword) ELSE 0 END))
+      *
+      (CASE WHEN filter_document_types IS NOT NULL AND d.document_type = ANY(filter_document_types) THEN 1.25 ELSE 1.0 END)
+      *
+      (CASE WHEN filter_years IS NULL AND filter_quarters IS NULL AND d.as_of_date IS NOT NULL
+        THEN GREATEST(
+          0.5,
+          1.0 - ((ABS(CURRENT_DATE - d.as_of_date)::FLOAT / 365.25) * 0.15)
+        )
+            ELSE 1.0 END)
+    )::FLOAT AS rrf_score
   FROM vector_matches v
   FULL OUTER JOIN keyword_matches k ON v.id = k.id
   JOIN document_chunks c ON c.id = COALESCE(v.id, k.id)
@@ -191,3 +286,4 @@ $$;
 -- Permissions
 GRANT ALL ON public.documents TO service_role;
 GRANT ALL ON public.document_chunks TO service_role;
+GRANT ALL ON public.companies TO service_role;
